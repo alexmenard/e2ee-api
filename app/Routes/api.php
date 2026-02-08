@@ -7,6 +7,8 @@ use App\Controllers\ProfileController;
 use App\Middleware\AuthMiddleware;
 use App\Controllers\KeysController;
 use App\Controllers\MessagesController;
+use App\Controllers\UsersController;
+use App\Controllers\ConversationsController;
 
 $router->get('/health', [HealthController::class, 'check']);
 
@@ -27,7 +29,11 @@ $router->post('/keys/upload', [KeysController::class, 'upload'], [
 
 $router->get('/keys/bundle', [KeysController::class, 'bundle']);
 
-$router->post('/messages/send', [MessagesController::class, 'send'], [
+$router->get('/keys/status', [KeysController::class, 'status'], [
+    AuthMiddleware::class
+]);
+
+$router->post('/messages/send-to-user', [MessagesController::class, 'sendToUser'], [
     AuthMiddleware::class
 ]);
 
@@ -35,10 +41,17 @@ $router->get('/messages/inbox', [MessagesController::class, 'inbox'], [
     AuthMiddleware::class
 ]);
 
-$router->get('/messages/with', [MessagesController::class, 'with'], [
+$router->post('/messages/ack', [MessagesController::class, 'ack'], [
     AuthMiddleware::class
 ]);
 
-$router->post('/messages/ack', [MessagesController::class, 'ack'], [
+$router->get('/users/devices', [UsersController::class, 'devices']);
+
+
+$router->get('/conversations', [ConversationsController::class, 'index'], [
+    AuthMiddleware::class
+]);
+
+$router->get('/messages/with-user', [ConversationsController::class, 'withUser'], [
     AuthMiddleware::class
 ]);

@@ -95,13 +95,30 @@ class KeysController
 
             $pdo->commit();
 
+            // Keep only latest 2 signed prekeys per device
+            $pdo->prepare("
+                    DELETE FROM signed_prekeys
+                    WHERE device_id = :device_id
+                    AND id NOT IN (
+                        SELECT id FROM (
+                        SELECT id
+                        FROM signed_prekeys
+                        WHERE device_id = :device_id2
+                        ORDER BY created_at DESC
+                        LIMIT 2
+                        ) t
+                    )
+                    ")->execute([
+                'device_id' => $deviceId,
+                'device_id2' => $deviceId
+            ]);
+
             return Response::json([
                 'status' => 'ok',
                 'device_id' => $deviceId,
                 'signed_prekey_key_id' => $spkKeyId,
                 'one_time_prekeys_received' => count($validatedOtk)
             ], 201);
-
         } catch (\Throwable $e) {
             $pdo->rollBack();
             return Response::error('Failed to upload keys', 500);
@@ -179,10 +196,58 @@ class KeysController
                     'public_key' => $otk['public_key'],
                 ] : null
             ]);
-
         } catch (\Throwable $e) {
             $pdo->rollBack();
             return Response::error('Failed to fetch bundle', 500);
         }
+    }
+
+    // GET /keys/status (protected)
+    public function status(Request $request): Response
+    {
+        $deviceId = (string)$request->getAttribute('device_id');
+        if ($deviceId === '') {
+            return Response::error('Unauthorized', 401);
+        }
+
+        $MIN_UNUSED = 20;
+        $MAX_UNUSED = 200;
+
+        $pdo = \App\Database\Database::connection();
+
+        // Current signed prekey (latest)
+        $stmt = $pdo->prepare("
+        SELECT key_id, created_at
+        FROM signed_prekeys
+        WHERE device_id = :device_id
+        ORDER BY created_at DESC
+        LIMIT 1
+    ");
+        $stmt->execute(['device_id' => $deviceId]);
+        $spk = $stmt->fetch(\PDO::FETCH_ASSOC);
+
+        // Count unused one-time prekeys
+        $stmt = $pdo->prepare("
+        SELECT COUNT(*) AS cnt
+        FROM one_time_prekeys
+        WHERE device_id = :device_id AND used_at IS NULL
+    ");
+        $stmt->execute(['device_id' => $deviceId]);
+        $unused = (int)$stmt->fetch(\PDO::FETCH_ASSOC)['cnt'];
+
+        return Response::json([
+            'device_id' => $deviceId,
+            'signed_prekey' => $spk ? [
+                'key_id' => (int)$spk['key_id'],
+                'created_at' => $spk['created_at']
+            ] : null,
+            'one_time_prekeys' => [
+                'unused' => $unused,
+                'min_required' => $MIN_UNUSED,
+                'max_allowed' => $MAX_UNUSED,
+                'needs_more' => ($unused < $MIN_UNUSED),
+                'recommended_upload' => max(0, $MAX_UNUSED - $unused)
+            ]
+        ]);
     }
 }

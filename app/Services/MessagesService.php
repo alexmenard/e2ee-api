@@ -7,69 +7,100 @@ use PDO;
 
 class MessagesService
 {
-    public function send(int $userId, string $senderDeviceId, string $recipientDeviceId, string $ciphertext): array
+    public function sendToUser(int $senderUserId, string $senderDeviceId, string $recipientUserUuid, array $payloads): array
     {
-        $senderDeviceId = trim($senderDeviceId);
-        $recipientDeviceId = trim($recipientDeviceId);
-
-        if ($senderDeviceId === '' || $recipientDeviceId === '' || strlen($recipientDeviceId) > 64) {
-            return ['error' => 'invalid_device_id'];
-        }
-
-        if ($senderDeviceId !== $recipientDeviceId && $senderDeviceId === '') {
-            return ['error' => 'invalid_sender'];
-        }
-
-        if ($ciphertext === '') {
-            return ['error' => 'missing_ciphertext'];
-        }
-
+        $recipientUserUuid = trim($recipientUserUuid);
+        if ($recipientUserUuid === '') return ['error' => 'missing_recipient_user'];
+    
+        if (empty($payloads)) return ['error' => 'missing_payloads'];
+    
         $pdo = Database::connection();
-
-        // 1) Make sure sender device belongs to this authenticated user
-        $stmt = $pdo->prepare("
-            SELECT user_id
-            FROM devices
-            WHERE device_id = :device_id
-            LIMIT 1
-        ");
-        $stmt->execute(['device_id' => $senderDeviceId]);
-        $senderRow = $stmt->fetch(PDO::FETCH_ASSOC);
-
-        if (!$senderRow || (int)$senderRow['user_id'] !== $userId) {
-            return ['error' => 'sender_device_not_allowed'];
+        $pdo->beginTransaction();
+    
+        try {
+            // Ensure sender device belongs to authenticated user
+            $stmt = $pdo->prepare("SELECT user_id FROM devices WHERE device_id = :d LIMIT 1");
+            $stmt->execute(['d' => $senderDeviceId]);
+            $row = $stmt->fetch(PDO::FETCH_ASSOC);
+    
+            if (!$row || (int)$row['user_id'] !== $senderUserId) {
+                $pdo->rollBack();
+                return ['error' => 'sender_device_not_allowed'];
+            }
+    
+            // Resolve recipient user_id
+            $stmt = $pdo->prepare("SELECT id FROM users WHERE uuid = :uuid LIMIT 1");
+            $stmt->execute(['uuid' => $recipientUserUuid]);
+            $recUser = $stmt->fetch(PDO::FETCH_ASSOC);
+    
+            if (!$recUser) {
+                $pdo->rollBack();
+                return ['error' => 'unknown_recipient_user'];
+            }
+    
+            $recipientUserId = (int)$recUser['id'];
+    
+            // Fetch recipient devices to validate membership
+            $stmt = $pdo->prepare("SELECT device_id FROM devices WHERE user_id = :uid");
+            $stmt->execute(['uid' => $recipientUserId]);
+            $allowed = [];
+            foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $d) {
+                $allowed[$d['device_id']] = true;
+            }
+    
+            // Insert one message per recipient device payload
+            $ins = $pdo->prepare("
+                INSERT INTO messages (sender_device_id, recipient_device_id, ciphertext)
+                VALUES (:sender, :recipient, :ciphertext)
+            ");
+    
+            $inserted = 0;
+            $results = [];
+    
+            foreach ($payloads as $i => $p) {
+                if (!is_array($p) || !isset($p['recipient_device_id'], $p['ciphertext'])) {
+                    $results[] = ['index' => $i, 'status' => 'rejected', 'reason' => 'bad_format'];
+                    continue;
+                }
+    
+                $rd = trim((string)$p['recipient_device_id']);
+                $ct = (string)$p['ciphertext'];
+    
+                if ($rd === '' || $ct === '') {
+                    $results[] = ['index' => $i, 'status' => 'rejected', 'reason' => 'missing_fields'];
+                    continue;
+                }
+    
+                if (!isset($allowed[$rd])) {
+                    $results[] = ['index' => $i, 'recipient_device_id' => $rd, 'status' => 'rejected', 'reason' => 'device_not_in_user'];
+                    continue;
+                }
+    
+                $ins->execute([
+                    'sender'    => $senderDeviceId,
+                    'recipient' => $rd,
+                    'ciphertext'=> $ct
+                ]);
+    
+                $inserted++;
+                $results[] = ['index' => $i, 'recipient_device_id' => $rd, 'status' => 'stored', 'message_id' => (int)$pdo->lastInsertId()];
+            }
+    
+            $pdo->commit();
+    
+            return [
+                'recipient_user_uuid' => $recipientUserUuid,
+                'sender_device_id' => $senderDeviceId,
+                'requested' => count($payloads),
+                'inserted' => $inserted,
+                'results' => $results
+            ];
+    
+        } catch (\Throwable $e) {
+            $pdo->rollBack();
+            return ['error' => 'send_to_user_failed'];
         }
-
-        // 2) Make sure recipient device exists
-        $stmt = $pdo->prepare("
-            SELECT id
-            FROM devices
-            WHERE device_id = :device_id
-            LIMIT 1
-        ");
-        $stmt->execute(['device_id' => $recipientDeviceId]);
-        $recipientRow = $stmt->fetch(PDO::FETCH_ASSOC);
-
-        if (!$recipientRow) {
-            return ['error' => 'unknown_recipient_device'];
-        }
-
-        // 3) Store ciphertext (server never decrypts)
-        $stmt = $pdo->prepare("
-            INSERT INTO messages (sender_device_id, recipient_device_id, ciphertext)
-            VALUES (:sender, :recipient, :ciphertext)
-        ");
-        $stmt->execute([
-            'sender'    => $senderDeviceId,
-            'recipient' => $recipientDeviceId,
-            'ciphertext' => $ciphertext
-        ]);
-
-        return [
-            'message_id' => (int)$pdo->lastInsertId(),
-            'status'     => 'queued'
-        ];
-    }
+    }    
 
     public function inbox(string $deviceId, int $afterId, int $limit): array
     {
